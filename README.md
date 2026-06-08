@@ -113,6 +113,29 @@ Set `APP_PASSWORD` in the Coolify environment variables.
 - In Site Manager, set **Host** to the IP only (`65.x.x.x`), **User** in the username field (`ftpuser`), not `user@host` in the host field.
 - Verify `APP_USER` and `APP_PASSWORD` match the Coolify environment variables.
 
+### Nothing connects after redeploy (terminal and FileZilla)
+
+Check the Coolify container logs first. Common causes:
+
+1. **Missing `APP_PASSWORD`** — container exits immediately with:
+   ```
+   ERROR: APP_PASSWORD environment variable is required.
+   ```
+2. **Port mapping lost** — confirm **Ports Mappings** still has `4550:22` (or your mapping) after redeploy.
+3. **Wrong `APP_USER`** — only `ftpuser` exists unless you rebuild the image with another username.
+4. **Firewall** — the host port (e.g. `4550`) must be open on the server/cloud firewall.
+5. **Wrong IP** — connect to the server IP, not the HTTP domain.
+
+Quick test from your machine:
+
+```bash
+nc -zv YOUR_SERVER_IP 4550
+sftp -P 4550 ftpuser@YOUR_SERVER_IP
+```
+
+- `nc` fails → port mapping or firewall problem (not FileZilla).
+- `nc` succeeds but `sftp` fails → credentials or container SSH issue; read Coolify logs for `SFTP ready:` or `ERROR:` lines.
+
 ### FileZilla times out but terminal `sftp` works
 
 OpenSSH 9.x enables post-quantum key exchange algorithms that older FileZilla versions do not support. The handshake stalls and FileZilla reports:
