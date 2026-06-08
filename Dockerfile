@@ -41,6 +41,10 @@ RUN rm -f /var/www/html/index.html \
       /etc/ssh/sshd_config \
   && echo "AllowUsers ${APP_USER}" >> /etc/ssh/sshd_config \
   && printf '%s\n' \
+      '#* FileZilla and other legacy SFTP clients do not support OpenSSH 9.x post-quantum KEX' \
+      'KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512' \
+      > /etc/ssh/sshd_config.d/filezilla-compat.conf \
+  && printf '%s\n' \
       "Match User ${APP_USER}" \
       '    ForceCommand internal-sftp' \
       '    AllowTcpForwarding no' \

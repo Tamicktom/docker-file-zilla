@@ -107,9 +107,25 @@ Set `APP_PASSWORD` in the Coolify environment variables.
 
 ### FileZilla cannot connect
 
-- Confirm port `22` is published in Coolify.
+- Confirm port `22` is published in Coolify via **Ports Mappings** (e.g. `4550:22`), not only **Ports Exposes**.
+- Connect to the server **IP and mapped port**, not the HTTP domain.
 - Use **SFTP**, not FTP or FTPS.
+- In Site Manager, set **Host** to the IP only (`65.x.x.x`), **User** in the username field (`ftpuser`), not `user@host` in the host field.
 - Verify `APP_USER` and `APP_PASSWORD` match the Coolify environment variables.
+
+### FileZilla times out but terminal `sftp` works
+
+OpenSSH 9.x enables post-quantum key exchange algorithms that older FileZilla versions do not support. The handshake stalls and FileZilla reports:
+
+```
+Connection timed out after 20 seconds of inactivity
+```
+
+This image configures compatible `KexAlgorithms` for FileZilla. If you still see this on an older build:
+
+1. Redeploy with the latest image.
+2. Update FileZilla to the latest version.
+3. Test from the same machine: `sftp -P 4550 ftpuser@YOUR_SERVER_IP`
 
 ### Uploaded files not visible on the website
 
