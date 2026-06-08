@@ -1,0 +1,7 @@
+.git
+.gitattributes
+README.md
+.cursor
+*.md
+.vscode
+.idea
