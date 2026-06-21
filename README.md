@@ -9,7 +9,7 @@ Single-container PHP hosting environment for [Coolify](https://coolify.io): uplo
 | Apache + PHP | 80 | Serve PHP projects from `/var/www/html` |
 | OpenSSH (SFTP only) | 22 | Manual file upload via FileZilla |
 
-PHP extensions included: `mysql`, `mbstring`, `xml`, `curl`, `zip`, `gd`.
+PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl`, `zip`, `gd`.
 
 ## Deploy on Coolify
 
@@ -58,7 +58,33 @@ If Coolify maps port 22 to a different host port, use that external port in File
 
 After connecting, you land in `/var/www/html`. Upload your PHP project files there.
 
-### 6. Verify
+### 7. PostgreSQL
+
+The image includes the PHP `pgsql` and `pdo_pgsql` extensions. To connect to a Postgres database (e.g. a Coolify Postgres resource on the same network):
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `DB_HOST` | `postgres` or internal hostname | Postgres host (Coolify service name) |
+| `DB_PORT` | `5432` | Postgres port |
+| `DB_DATABASE` | `myapp` | Database name |
+| `DB_USERNAME` | `postgres` | Database user |
+| `DB_PASSWORD` | — | Database password (Coolify secret) |
+
+In PHP (PDO):
+
+```php
+$dsn = sprintf(
+    'pgsql:host=%s;port=%s;dbname=%s',
+    getenv('DB_HOST'),
+    getenv('DB_PORT') ?: '5432',
+    getenv('DB_DATABASE')
+);
+$pdo = new PDO($dsn, getenv('DB_USERNAME'), getenv('DB_PASSWORD'));
+```
+
+Link the Postgres resource to this app in Coolify so both containers share the same Docker network. Use the internal hostname Coolify provides — not the public IP.
+
+### 8. Verify
 
 1. Open `http://your-coolify-domain/` in a browser.
 2. Upload or replace `index.php` via FileZilla.

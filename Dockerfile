@@ -15,6 +15,7 @@ RUN apt-get update \
       php-gd \
       php-mbstring \
       php-mysql \
+      php-pgsql \
       php-xml \
       php-zip \
       openssl \
