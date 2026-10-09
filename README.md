@@ -1,13 +1,13 @@
 # docker-file-zilla
 
-Single-container PHP hosting environment for [Coolify](https://coolify.io): upload files via **SFTP** (FileZilla) and serve them with **Apache + PHP**.
+Single-container PHP hosting environment for [Coolify](https://coolify.io): upload files via **SFTP** (FileZilla), manage them through an **SSH shell**, and serve them with **Apache + PHP**.
 
 ## What is inside
 
 | Service | Port | Purpose |
 |---------|------|---------|
 | Apache + PHP | 80 | Serve PHP projects from `/var/www/html` |
-| OpenSSH (SFTP only) | 22 | Manual file upload via FileZilla |
+| OpenSSH (SSH + SFTP) | 22 | Shell access and file upload via FileZilla |
 
 PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl`, `zip`, `gd`.
 
@@ -22,8 +22,8 @@ PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `APP_PASSWORD` | **Yes** | — | SFTP login password (store as a Coolify secret) |
-| `APP_USER` | No | `ftpuser` | SFTP username |
+| `APP_PASSWORD` | **Yes** | — | SSH and SFTP login password (store as a Coolify secret) |
+| `APP_USER` | No | `ftpuser` | SSH and SFTP username |
 
 The container will **not start** without `APP_PASSWORD`.
 
@@ -42,9 +42,9 @@ Without this volume, uploaded PHP files are lost when the container is recreated
 | Container port | Usage |
 |----------------|-------|
 | `80` | HTTP — assign a Coolify domain (TLS handled by Coolify proxy) |
-| `22` | SFTP — publish this port for FileZilla access |
+| `22` | SSH + SFTP — publish this port for shell and FileZilla access |
 
-If Coolify maps port 22 to a different host port, use that external port in FileZilla.
+If Coolify maps port 22 to a different host port, use that external port in both SSH and FileZilla.
 
 ### 5. FileZilla connection
 
@@ -57,6 +57,22 @@ If Coolify maps port 22 to a different host port, use that external port in File
 | Password | Value of `APP_PASSWORD` |
 
 After connecting, you land in `/var/www/html`. Upload your PHP project files there.
+
+### 6. SSH connection
+
+Use the **same username and password as SFTP** (`APP_USER` and `APP_PASSWORD`), on the same published port:
+
+```bash
+ssh -p 4550 ftpuser@YOUR_SERVER_IP
+```
+
+Replace `4550` with your mapped port (`22` if unchanged) and `ftpuser` with `APP_USER`. Enter `APP_PASSWORD` when prompted. Both shell sessions and remote commands start in `/var/www/html`:
+
+```bash
+ssh -p 4550 ftpuser@YOUR_SERVER_IP 'pwd; php -v'
+```
+
+The application user has a Bash shell, not root or sudo access. Root login, TCP forwarding and X11 forwarding remain disabled. Shell access is not chrooted: the user can read files elsewhere in the container when Unix permissions allow it. Only give these shared credentials to trusted users.
 
 ### 7. PostgreSQL
 
@@ -104,6 +120,7 @@ docker run -d --name php-sftp-test \
 
 - HTTP: `curl http://localhost:8080/`
 - SFTP: connect FileZilla to `localhost`, port `2222`, user `ftpuser`
+- SSH: `ssh -p 2222 ftpuser@localhost` (same `APP_PASSWORD`)
 
 Stop and remove:
 
@@ -112,11 +129,21 @@ docker rm -f php-sftp-test
 docker volume rm php-data
 ```
 
+### Automated integration tests
+
+With Docker, Bash, OpenSSH client, `sshpass` and `curl` installed, run:
+
+```bash
+bash test-integration.sh
+```
+
+The script builds the image and tests password validation, SSH commands and a PTY shell, SFTP upload/download, PHP over HTTP, PHP extensions, denied logins/forwarding, restart behavior, password rotation, health and volume persistence. Test containers, volumes and temporary files are cleaned up automatically. It uses ephemeral loopback-only published ports by default. On environments without Docker bridge networking, `DOCKER_BUILD_NETWORK=host DOCKER_TEST_NETWORK=direct bash test-integration.sh` builds using the host network and connects directly to the test container on an isolated bridge (no host-port conflicts).
+
 ## Limitations
 
 - **Manual deploy only** — there is no CI/CD; you upload files yourself via FileZilla.
 - **Password authentication** — keep `APP_PASSWORD` as a Coolify secret and rotate it periodically.
-- **SFTP only** — interactive SSH shell access is disabled; only file transfer is allowed.
+- **Trusted shell users** — SSH grants command execution as the application user; it is not a restricted SFTP-only account.
 - **No volume, no files** — always configure persistent storage on `/var/www/html` in production.
 
 ## Troubleshooting
@@ -160,7 +187,7 @@ sftp -P 4550 ftpuser@YOUR_SERVER_IP
 ```
 
 - `nc` fails → port mapping or firewall problem (not FileZilla).
-- `nc` succeeds but `sftp` fails → credentials or container SSH issue; read Coolify logs for `SFTP ready:` or `ERROR:` lines.
+- `nc` succeeds but `sftp` fails → credentials or container SSH issue; read Coolify logs for `SSH/SFTP ready:` or `ERROR:` lines.
 
 ### FileZilla times out but terminal `sftp` works
 
@@ -178,7 +205,7 @@ This image configures compatible `KexAlgorithms` for FileZilla. If you still see
 
 ### Uploaded files not visible on the website
 
-- Confirm files were uploaded to `/` (which maps to `/var/www/html`).
+- Confirm files were uploaded to `/var/www/html` (the initial SFTP directory).
 - Ensure a volume is mounted at `/var/www/html`.
 - Check that `index.php` or `index.html` exists in the document root.
 

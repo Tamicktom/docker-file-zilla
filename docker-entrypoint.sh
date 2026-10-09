@@ -38,7 +38,7 @@ fi
 
 find /var/www/html -type d -exec chmod g+s {} + 2>/dev/null || true
 
-echo "SFTP ready: user=${APP_USER}, port=22, document_root=/var/www/html"
+echo "SSH/SFTP ready: user=${APP_USER}, port=22, document_root=/var/www/html"
 
 if [ -z "$(ls -A /var/www/html 2>/dev/null)" ]; then
   cat > /var/www/html/index.php <<'EOF'
