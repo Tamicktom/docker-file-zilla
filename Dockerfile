@@ -1,4 +1,4 @@
-#* Debian image with SSH, SFTP (FileZilla), Apache and PHP via Supervisor
+#* Debian image with SSH, SFTP (FileZilla), cron, Apache and PHP via Supervisor
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,6 +7,7 @@ ENV APP_USER=ftpuser
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
       apache2 \
+      cron \
       curl \
       libapache2-mod-php \
       php \
@@ -59,7 +60,7 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 
 RUN chmod +x /docker-entrypoint.sh
 
-VOLUME ["/var/www/html"]
+VOLUME ["/var/www/html", "/var/spool/cron/crontabs"]
 
 EXPOSE 22 80
 

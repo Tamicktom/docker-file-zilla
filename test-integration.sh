@@ -13,6 +13,7 @@ image="${TEST_IMAGE:-php-ssh-sftp:integration}"
 prefix="php-ssh-test-$$"
 container="$prefix-app"
 volume="$prefix-data"
+cron_volume="$prefix-crontabs"
 network="$prefix-network"
 workdir="$(mktemp -d)"
 export SSHPASS='Integration-$! password:with spaces'
@@ -25,8 +26,8 @@ cleanup() {
     docker logs "$container" >&2 2>/dev/null || true
     docker exec "$container" cat /var/log/supervisor/sshd.err.log >&2 2>/dev/null || true
   fi
-  docker rm -f "$container" "$prefix-missing" "$prefix-empty" "$prefix-user" >/dev/null 2>&1 || true
-  docker volume rm "$volume" >/dev/null 2>&1 || true
+  docker rm -fv "$container" "$prefix-missing" "$prefix-empty" "$prefix-user" >/dev/null 2>&1 || true
+  docker volume rm "$volume" "$cron_volume" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$workdir"
 }
@@ -60,6 +61,7 @@ pass 'Missing/empty password and nonexistent APP_USER fail clearly'
 # Isolated bridge: no outside network access is needed by the running app.
 docker network create --internal "$network" >/dev/null
 docker volume create "$volume" >/dev/null
+docker volume create "$cron_volume" >/dev/null
 run_app() {
   local publish_args=()
   if [[ "${DOCKER_TEST_NETWORK:-published}" != direct ]]; then
@@ -67,7 +69,7 @@ run_app() {
   fi
   docker run -d --name "$container" --network "$network" \
     "${publish_args[@]}" -e APP_PASSWORD="$SSHPASS" \
-    -v "$volume:/var/www/html" "$image" >/dev/null
+    -v "$volume:/var/www/html" -v "$cron_volume:/var/spool/cron/crontabs" "$image" >/dev/null
   if [[ "${DOCKER_TEST_NETWORK:-published}" == direct ]]; then
     host="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container")"
     ssh_port=22
@@ -173,16 +175,98 @@ pass 'SSH can write served files with the shared www-data group and run PHP CLI'
 ssh_app 'php -r '\''foreach (["mysqli", "pdo_mysql", "pgsql", "pdo_pgsql", "mbstring", "xml", "curl", "zip", "gd"] as $ext) { if (!extension_loaded($ext)) { fwrite(STDERR, "Missing: $ext\n"); exit(1); } }'\'''
 pass 'Existing PHP extensions remain installed'
 
-# Check that both access paths recover after a restart.
+# Exercise crontab through PHP itself, including Apache's www-data identity.
+# These endpoints are test-only fixtures and are removed before cleanup.
+cat >"$workdir/cron-test-setup.php" <<'PHP'
+<?php
+$role = PHP_SAPI === 'cli' ? 'cli' : 'web';
+$action = PHP_SAPI === 'cli' ? ($argv[1] ?? 'install') : ($_GET['action'] ?? 'install');
+$command = match ($action) {
+    'install' => ['/usr/bin/crontab', '-'],
+    'list' => ['/usr/bin/crontab', '-l'],
+    'remove' => ['/usr/bin/crontab', '-r'],
+    default => throw new RuntimeException('Invalid test action'),
+};
+$process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+if (!is_resource($process)) {
+    throw new RuntimeException('Cannot execute crontab');
+}
+if ($action === 'install') {
+    fwrite($pipes[0], "SHELL=/bin/sh\nPATH=/usr/bin:/bin\n* * * * * cd /var/www/html && /usr/bin/php cron-test-job.php $role > /var/www/html/$role-cron.log 2>&1\n");
+}
+fclose($pipes[0]);
+$output = stream_get_contents($pipes[1]);
+$error = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+$status = proc_close($process);
+if ($status !== 0) {
+    http_response_code(500);
+    fwrite(fopen('php://stderr', 'w'), $error);
+    exit(1);
+}
+echo $action === 'list' ? $output : "CRONTAB_OK:$role:$action";
+PHP
+cat >"$workdir/cron-test-job.php" <<'PHP'
+<?php
+exec('/usr/bin/id -un', $lines, $status);
+if ($status !== 0) {
+    exit(1);
+}
+$result = ['user' => trim(implode('', $lines)), 'sapi' => PHP_SAPI,
+    'cwd' => getcwd(), 'pgsql' => extension_loaded('pdo_pgsql')];
+file_put_contents(__DIR__ . '/' . $argv[1] . '-cron-result.json', json_encode($result));
+PHP
+printf 'put %s cron-test-setup.php\nput %s cron-test-job.php\nquit\n' \
+  "$workdir/cron-test-setup.php" "$workdir/cron-test-job.php" | \
+  sshpass -e sftp "${sftp_options[@]}" "ftpuser@$host" >"$workdir/cron-upload.log" 2>&1
+# The project does not expose supervisorctl RPC; inspect the actual daemon instead.
+docker exec "$container" /bin/sh -c 'test -s /var/run/crond.pid && kill -0 "$(cat /var/run/crond.pid)"'
+[[ "$(docker exec "$container" stat -c '%U:%G:%a' /var/spool/cron/crontabs)" == root:crontab:1730 ]] || fail 'Incorrect crontab spool permissions'
+pass 'Cron daemon runs under Supervisor with correct persistent spool permissions'
+
+[[ "$(ssh_app 'php /var/www/html/cron-test-setup.php')" == CRONTAB_OK:cli:install ]] || fail 'PHP CLI cannot install crontab'
+ssh_app 'php /var/www/html/cron-test-setup.php list' | grep -Fq 'cron-test-job.php cli' || fail 'PHP CLI cannot list crontab'
+[[ "$(curl -fsS --max-time 5 "http://$host:$http_port/cron-test-setup.php")" == CRONTAB_OK:web:install ]] || fail 'Apache PHP cannot install crontab'
+curl -fsS --max-time 5 "http://$host:$http_port/cron-test-setup.php?action=list" | grep -Fq 'cron-test-job.php web' || fail 'Apache PHP cannot list crontab'
+pass 'PHP CLI and Apache PHP install/list their own crontabs without root'
+
+wait_cron_jobs() {
+  local stage="$1" ready=0
+  echo "Waiting for a real cron minute tick ($stage; timeout 90s)..."
+  for ((i=0; i<90; i++)); do
+    if docker exec "$container" test -s /var/www/html/cli-cron-result.json && \
+       docker exec "$container" test -s /var/www/html/web-cron-result.json; then
+      ready=1
+      break
+    fi
+    if (( i % 15 == 0 )); then echo "Cron wait: $stage, ${i}s elapsed"; fi
+    sleep 1
+  done
+  [[ "$ready" == 1 ]] || {
+    docker exec "$container" /bin/sh -c 'cat /var/www/html/*-cron.log /var/log/supervisor/cron.err.log' >&2 || true
+    fail "Cron jobs did not execute: $stage"
+  }
+  docker exec "$container" php -r 'foreach (["cli" => "ftpuser", "web" => "www-data"] as $role => $user) { $data = json_decode(file_get_contents("/var/www/html/$role-cron-result.json"), true); if ($data["user"] !== $user || $data["sapi"] !== "cli" || $data["cwd"] !== "/var/www/html" || !$data["pgsql"]) { fwrite(STDERR, json_encode($data)); exit(1); } }'
+}
+wait_cron_jobs initial
+pass 'Cron actually executes PHP jobs as ftpuser and www-data with PHP extensions'
+
+
+# Check that SSH/SFTP and scheduled PHP jobs recover after a restart.
+docker exec "$container" rm /var/www/html/cli-cron-result.json /var/www/html/web-cron-result.json
 docker restart "$container" >/dev/null
 wait_ready
 printf 'get uploaded.php %s\nquit\n' "$workdir/after-restart.php" | \
   sshpass -e sftp "${sftp_options[@]}" "ftpuser@$host" >"$workdir/restart-sftp.log" 2>&1
 cmp "$workdir/upload.php" "$workdir/after-restart.php"
 pass 'SSH/SFTP survive a restart and uploaded files persist'
+wait_cron_jobs restart
+pass 'Scheduled PHP jobs execute again after restart'
 
 # Recreate with the same volume and a new password: both protocols share rotation.
-docker rm -f "$container" >/dev/null
+docker exec "$container" rm /var/www/html/cli-cron-result.json /var/www/html/web-cron-result.json
+docker rm -fv "$container" >/dev/null
 export SSHPASS='Rotated-$! password:also special'
 run_app
 wait_ready
@@ -195,6 +279,18 @@ printf 'get uploaded.php %s\nquit\n' "$workdir/after-recreate.php" | \
 cmp "$workdir/upload.php" "$workdir/after-recreate.php"
 [[ "$(curl -fsS --max-time 5 "http://$host:$http_port/uploaded.php")" == SFTP_PHP_OK ]]
 pass 'Recreation preserves files and rotates the shared SSH/SFTP password'
+wait_cron_jobs recreation
+pass 'Persistent crontabs execute PHP again after container recreation'
+[[ "$(ssh_app 'php /var/www/html/cron-test-setup.php remove')" == CRONTAB_OK:cli:remove ]] || fail 'PHP CLI cannot remove crontab'
+[[ "$(curl -fsS --max-time 5 "http://$host:$http_port/cron-test-setup.php?action=remove")" == CRONTAB_OK:web:remove ]] || fail 'Apache PHP cannot remove crontab'
+for user in ftpuser www-data; do
+  if docker exec --user "$user" "$container" crontab -l >"$workdir/removed-$user.log" 2>&1; then
+    fail "Crontab for $user still exists"
+  fi
+  grep -Fq 'no crontab for' "$workdir/removed-$user.log" || fail 'Unexpected removal failure'
+done
+ssh_app 'rm cron-test-setup.php cron-test-job.php'
+pass 'PHP CLI and Apache PHP remove their own crontabs; test endpoints are deleted'
 
 healthy=0
 for ((i=0; i<60; i++)); do

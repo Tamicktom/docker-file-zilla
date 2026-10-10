@@ -18,6 +18,12 @@ printf '%s:%s\n' "${APP_USER}" "${APP_PASSWORD}" | chpasswd
 
 mkdir -p /var/run/sshd
 
+#* A fresh cron volume must keep Debian's setgid crontab access permissions.
+#* PHP runs as www-data; SSH/CLI runs as APP_USER. Each owns its own crontab.
+mkdir -p /var/spool/cron/crontabs
+chown root:crontab /var/spool/cron/crontabs
+chmod 1730 /var/spool/cron/crontabs
+
 #* Ensure SSH host keys exist (volume mounts may overwrite /etc/ssh)
 if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
   ssh-keygen -A
@@ -39,6 +45,7 @@ fi
 find /var/www/html -type d -exec chmod g+s {} + 2>/dev/null || true
 
 echo "SSH/SFTP ready: user=${APP_USER}, port=22, document_root=/var/www/html"
+echo "Cron configured: PHP user=www-data, SSH/CLI user=${APP_USER}, crontabs=/var/spool/cron/crontabs"
 
 if [ -z "$(ls -A /var/www/html 2>/dev/null)" ]; then
   cat > /var/www/html/index.php <<'EOF'
