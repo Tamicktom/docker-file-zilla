@@ -1,4 +1,4 @@
-#* Debian image with SFTP (FileZilla), Apache and PHP via Supervisor
+#* Debian image with SSH, SFTP (FileZilla), cron, Apache and PHP via Supervisor
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,6 +7,7 @@ ENV APP_USER=ftpuser
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
       apache2 \
+      cron \
       curl \
       libapache2-mod-php \
       php \
@@ -31,14 +32,15 @@ RUN apt-get update \
 RUN mkdir -p /var/run/sshd \
   && ssh-keygen -A
 
-#* Dedicated user for SFTP uploads; home is the Apache document root
+#* Shared SSH/SFTP user; home is the Apache document root
 RUN rm -f /var/www/html/index.html \
-  && useradd --no-create-home --home-dir /var/www/html --shell /usr/sbin/nologin --groups www-data "${APP_USER}" \
+  && useradd --no-create-home --home-dir /var/www/html --shell /bin/bash --groups www-data "${APP_USER}" \
   && chown "${APP_USER}":www-data /var/www/html \
   && chmod g+rwx /var/www/html \
   && sed -i \
       -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
       -e 's/^#\?PermitRootLogin.*/PermitRootLogin no/' \
+      -e 's/^Subsystem[[:space:]]\+sftp.*/Subsystem sftp internal-sftp/' \
       /etc/ssh/sshd_config \
   && echo "AllowUsers ${APP_USER}" >> /etc/ssh/sshd_config \
   && printf '%s\n' \
@@ -48,10 +50,9 @@ RUN rm -f /var/www/html/index.html \
   && printf '%s\n' \
       "Match User ${APP_USER}" \
       '    PasswordAuthentication yes' \
-      '    ForceCommand internal-sftp' \
       '    AllowTcpForwarding no' \
       '    X11Forwarding no' \
-      > /etc/ssh/sshd_config.d/sftp-only.conf
+      > /etc/ssh/sshd_config.d/app-user.conf
 
 COPY apache-vhost.conf /etc/apache2/sites-available/000-default.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
@@ -59,7 +60,7 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 
 RUN chmod +x /docker-entrypoint.sh
 
-VOLUME ["/var/www/html"]
+VOLUME ["/var/www/html", "/var/spool/cron/crontabs"]
 
 EXPOSE 22 80
 

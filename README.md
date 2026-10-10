@@ -1,13 +1,14 @@
 # docker-file-zilla
 
-Single-container PHP hosting environment for [Coolify](https://coolify.io): upload files via **SFTP** (FileZilla) and serve them with **Apache + PHP**.
+Single-container PHP hosting environment for [Coolify](https://coolify.io): upload files via **SFTP** (FileZilla), manage them through an **SSH shell**, and serve them with **Apache + PHP**.
 
 ## What is inside
 
 | Service | Port | Purpose |
 |---------|------|---------|
 | Apache + PHP | 80 | Serve PHP projects from `/var/www/html` |
-| OpenSSH (SFTP only) | 22 | Manual file upload via FileZilla |
+| OpenSSH (SSH + SFTP) | 22 | Shell access and file upload via FileZilla |
+| Cron | — | Execute scheduled commands and PHP CLI scripts |
 
 PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl`, `zip`, `gd`.
 
@@ -22,8 +23,8 @@ PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `APP_PASSWORD` | **Yes** | — | SFTP login password (store as a Coolify secret) |
-| `APP_USER` | No | `ftpuser` | SFTP username |
+| `APP_PASSWORD` | **Yes** | — | SSH and SFTP login password (store as a Coolify secret) |
+| `APP_USER` | No | `ftpuser` | SSH and SFTP username |
 
 The container will **not start** without `APP_PASSWORD`.
 
@@ -37,14 +38,22 @@ Mount a volume to:
 
 Without this volume, uploaded PHP files are lost when the container is recreated.
 
+To preserve user crontabs across rebuilds/redeploys, also mount a **separate persistent volume** at:
+
+```
+/var/spool/cron/crontabs
+```
+
+Keep both volumes attached to the replacement container. The entrypoint sets the crontab directory to `root:crontab` with mode `1730`; do not make it world-writable. Without an explicitly reused volume here, schedules do not survive container recreation.
+
 ### 4. Ports
 
 | Container port | Usage |
 |----------------|-------|
 | `80` | HTTP — assign a Coolify domain (TLS handled by Coolify proxy) |
-| `22` | SFTP — publish this port for FileZilla access |
+| `22` | SSH + SFTP — publish this port for shell and FileZilla access |
 
-If Coolify maps port 22 to a different host port, use that external port in FileZilla.
+If Coolify maps port 22 to a different host port, use that external port in both SSH and FileZilla.
 
 ### 5. FileZilla connection
 
@@ -57,6 +66,22 @@ If Coolify maps port 22 to a different host port, use that external port in File
 | Password | Value of `APP_PASSWORD` |
 
 After connecting, you land in `/var/www/html`. Upload your PHP project files there.
+
+### 6. SSH connection
+
+Use the **same username and password as SFTP** (`APP_USER` and `APP_PASSWORD`), on the same published port:
+
+```bash
+ssh -p 4550 ftpuser@YOUR_SERVER_IP
+```
+
+Replace `4550` with your mapped port (`22` if unchanged) and `ftpuser` with `APP_USER`. Enter `APP_PASSWORD` when prompted. Both shell sessions and remote commands start in `/var/www/html`:
+
+```bash
+ssh -p 4550 ftpuser@YOUR_SERVER_IP 'pwd; php -v'
+```
+
+The application user has a Bash shell, not root or sudo access. Root login, TCP forwarding and X11 forwarding remain disabled. Shell access is not chrooted: the user can read files elsewhere in the container when Unix permissions allow it. Only give these shared credentials to trusted users.
 
 ### 7. PostgreSQL
 
@@ -84,7 +109,50 @@ $pdo = new PDO($dsn, getenv('DB_USERNAME'), getenv('DB_PASSWORD'));
 
 Link the Postgres resource to this app in Coolify so both containers share the same Docker network. Use the internal hostname Coolify provides — not the public IP.
 
-### 8. Verify
+### 8. Cron and PHP
+
+The image installs Debian `cron` and Supervisor starts `/usr/sbin/cron -f`, with automatic restart. No application jobs are installed by default.
+
+**There are two separate user crontabs:**
+
+- SSH and PHP CLI invoked over SSH run as `APP_USER` (default `ftpuser`). Use `crontab -e`, `crontab -l` and `crontab -r` for that user's jobs.
+- PHP served by Apache runs as `www-data`. It can invoke `/usr/bin/crontab` to install/list/remove **its own** jobs. It cannot manage root's or `ftpuser`'s crontab. No sudo, root web access or additional group membership is required; Debian's packaged `crontab` executable handles access.
+
+For example, install this line using `crontab -e` over SSH to execute PHP every minute:
+
+```cron
+* * * * * cd /var/www/html && /usr/bin/php scheduled-task.php >> /var/www/html/scheduled-task.log 2>&1
+```
+
+Replace `scheduled-task.php` with your application's script. The log path above is a simple example; in production, keep logs outside the public document root or deny HTTP access to them, and configure rotation.
+
+To install a schedule from PHP (CLI or Apache):
+
+```php
+$process = proc_open(
+    ['/usr/bin/crontab', '-'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $pipes
+);
+if (!is_resource($process)) {
+    throw new RuntimeException('Unable to start crontab');
+}
+fwrite($pipes[0], "* * * * * cd /var/www/html && /usr/bin/php scheduled-task.php >> /var/www/html/scheduled-task.log 2>&1\n");
+fclose($pipes[0]);
+$output = stream_get_contents($pipes[1]);
+$error = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+if (proc_close($process) !== 0) {
+    throw new RuntimeException('Unable to install crontab: ' . $error);
+}
+```
+
+`crontab -` **replaces the current user's whole crontab**, so include all intended jobs. Run installation only during application setup or through a protected admin action, not an unauthenticated public endpoint. Do not interpolate untrusted input into shell commands or schedules. The stock image permits `proc_open`/`exec`; custom PHP hardening that disables these functions will prevent PHP from managing crontabs.
+
+Cron launches PHP scripts with **PHP CLI**, even when Apache PHP installed the schedule. It uses the container's timezone and a minimal environment: use absolute executable paths, set the working directory explicitly, and load your application's environment/configuration from a permission-restricted file outside the public web root. Coolify/Docker environment variables such as `DB_*` are **not automatically inherited by cron jobs**. Do not store passwords in crontabs or expose them in logs. Tasks run only while this container and cron are running; missed executions during downtime are not replayed.
+
+### 9. Verify
 
 1. Open `http://your-coolify-domain/` in a browser.
 2. Upload or replace `index.php` via FileZilla.
@@ -99,25 +167,38 @@ docker run -d --name php-sftp-test \
   -p 8080:80 \
   -p 2222:22 \
   -v php-data:/var/www/html \
+  -v php-crontabs:/var/spool/cron/crontabs \
   php-sftp
 ```
 
 - HTTP: `curl http://localhost:8080/`
 - SFTP: connect FileZilla to `localhost`, port `2222`, user `ftpuser`
+- SSH: `ssh -p 2222 ftpuser@localhost` (same `APP_PASSWORD`)
 
 Stop and remove:
 
 ```bash
 docker rm -f php-sftp-test
-docker volume rm php-data
+docker volume rm php-data php-crontabs
 ```
+
+### Automated integration tests
+
+With Docker, Bash, OpenSSH client, `sshpass` and `curl` installed, run:
+
+```bash
+bash test-integration.sh
+```
+
+The script builds the image and tests password validation, SSH commands and a PTY shell, SFTP upload/download, PHP over HTTP, PHP extensions, denied logins/forwarding, restart behavior, password rotation, health and volume persistence. It also verifies PHP CLI and Apache PHP installing/listing/removing their own crontabs, actual minute-tick execution of PHP jobs as `ftpuser`/`www-data`, and scheduled execution after restart and recreation with reused volumes (allow a few minutes). Test containers, volumes and temporary files are cleaned up automatically. It uses ephemeral loopback-only published ports by default. On environments without Docker bridge networking, `DOCKER_BUILD_NETWORK=host DOCKER_TEST_NETWORK=direct bash test-integration.sh` builds using the host network and connects directly to the test container on an isolated bridge (no host-port conflicts).
 
 ## Limitations
 
 - **Manual deploy only** — there is no CI/CD; you upload files yourself via FileZilla.
 - **Password authentication** — keep `APP_PASSWORD` as a Coolify secret and rotate it periodically.
-- **SFTP only** — interactive SSH shell access is disabled; only file transfer is allowed.
-- **No volume, no files** — always configure persistent storage on `/var/www/html` in production.
+- **Trusted shell users** — SSH grants command execution as the application user; it is not a restricted SFTP-only account.
+- **No volume, no files or schedules** — configure persistent storage on `/var/www/html` and `/var/spool/cron/crontabs` in production.
+- **Cron environment** — scheduled PHP uses CLI and does not automatically receive deployment environment variables; load application configuration explicitly.
 
 ## Troubleshooting
 
@@ -160,7 +241,7 @@ sftp -P 4550 ftpuser@YOUR_SERVER_IP
 ```
 
 - `nc` fails → port mapping or firewall problem (not FileZilla).
-- `nc` succeeds but `sftp` fails → credentials or container SSH issue; read Coolify logs for `SFTP ready:` or `ERROR:` lines.
+- `nc` succeeds but `sftp` fails → credentials or container SSH issue; read Coolify logs for `SSH/SFTP ready:` or `ERROR:` lines.
 
 ### FileZilla times out but terminal `sftp` works
 
@@ -178,7 +259,7 @@ This image configures compatible `KexAlgorithms` for FileZilla. If you still see
 
 ### Uploaded files not visible on the website
 
-- Confirm files were uploaded to `/` (which maps to `/var/www/html`).
+- Confirm files were uploaded to `/var/www/html` (the initial SFTP directory).
 - Ensure a volume is mounted at `/var/www/html`.
 - Check that `index.php` or `index.html` exists in the document root.
 
