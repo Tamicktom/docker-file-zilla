@@ -174,6 +174,9 @@ grep -Fqx PHP_CLI_OK "$workdir/php-cli.log" || fail 'PHP CLI failed'
 pass 'SSH can write served files with the shared www-data group and run PHP CLI'
 ssh_app 'php -r '\''foreach (["mysqli", "pdo_mysql", "pgsql", "pdo_pgsql", "mbstring", "xml", "curl", "zip", "gd"] as $ext) { if (!extension_loaded($ext)) { fwrite(STDERR, "Missing: $ext\n"); exit(1); } }'\'''
 pass 'Existing PHP extensions remain installed'
+ssh_app 'php -r '\''exit(str_starts_with(PHP_VERSION, "8.5.") ? 0 : 1);'\''' || fail 'PHP CLI is not 8.5'
+curl -fsS --max-time 5 "http://$host:$http_port/" | grep -Eq '<p>8\.5\.[0-9]+' || fail 'Apache PHP is not 8.5'
+pass 'PHP CLI and Apache PHP run PHP 8.5'
 
 # Exercise crontab through PHP itself, including Apache's www-data identity.
 # These endpoints are test-only fixtures and are removed before cleanup.
