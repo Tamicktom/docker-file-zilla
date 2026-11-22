@@ -4,24 +4,37 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV APP_USER=ftpuser
 
+#* PHP minor version (packages from packages.sury.org). Every build installs the
+#* newest 8.5.x patch release available; rebuild without cache to pick up updates.
+ARG PHP_VERSION=8.5
+
 RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && curl -fsSLo /tmp/debsuryorg-archive-keyring.deb https://packages.sury.org/debsuryorg-archive-keyring.deb \
+  && dpkg -i /tmp/debsuryorg-archive-keyring.deb \
+  && rm -f /tmp/debsuryorg-archive-keyring.deb \
+  && . /etc/os-release \
+  && echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/php.list \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
       apache2 \
       cron \
-      curl \
-      libapache2-mod-php \
-      php \
-      php-cli \
-      php-curl \
-      php-gd \
-      php-mbstring \
-      php-mysql \
-      php-pgsql \
-      php-xml \
-      php-zip \
+      libapache2-mod-php${PHP_VERSION} \
+      php${PHP_VERSION} \
+      php${PHP_VERSION}-cli \
+      php${PHP_VERSION}-curl \
+      php${PHP_VERSION}-gd \
+      php${PHP_VERSION}-mbstring \
+      php${PHP_VERSION}-mysql \
+      php${PHP_VERSION}-pgsql \
+      php${PHP_VERSION}-xml \
+      php${PHP_VERSION}-zip \
       openssl \
       openssh-server \
       supervisor \
+  && apt-get upgrade -y \
+  && php -r 'exit(str_starts_with(PHP_VERSION, getenv("PHP_VERSION") . ".") ? 0 : 1);' \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* \
   && a2enmod rewrite \

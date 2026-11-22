@@ -10,7 +10,19 @@ Single-container PHP hosting environment for [Coolify](https://coolify.io): uplo
 | OpenSSH (SSH + SFTP) | 22 | Shell access and file upload via FileZilla |
 | Cron | — | Execute scheduled commands and PHP CLI scripts |
 
+PHP version: **8.5** (always the newest 8.5.x patch release at build time, from the [packages.sury.org](https://packages.sury.org/php/) Debian repository).
+
 PHP extensions included: `mysql`, `pgsql` (PostgreSQL), `mbstring`, `xml`, `curl`, `zip`, `gd`.
+
+### Keeping PHP 8.5 up to date
+
+Each image build installs the latest available PHP 8.5.x release. Docker's layer cache can keep an older build, so rebuild without cache to pick up new patch releases:
+
+```bash
+docker build --pull --no-cache -t php-sftp .
+```
+
+On Coolify, use **Redeploy** with the *Force rebuild / disable build cache* option (or disable the build cache in the resource settings). The build fails if the installed PHP is not from the configured minor version (`ARG PHP_VERSION=8.5`).
 
 ## Deploy on Coolify
 
